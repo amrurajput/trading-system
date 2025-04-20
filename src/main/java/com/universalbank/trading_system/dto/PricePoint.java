@@ -1,4 +1,4 @@
-package com.universalbank.trading_system.entity;
+package com.universalbank.trading_system.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;

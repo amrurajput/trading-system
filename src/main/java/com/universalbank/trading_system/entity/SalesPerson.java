@@ -16,6 +16,8 @@ public class SalesPerson {
         joinColumns=@JoinColumn(name="salesperson_id"),
         inverseJoinColumns=@JoinColumn(name="client_id"))
     private Set<Client> clients;
+    private Boolean isActive;
+    private Boolean isOccupied;
     private LocalDateTime createdAt;
     private String createdBy;
     private LocalDateTime updatedAt;
