@@ -1,15 +1,20 @@
 package com.universalbank.trading_system.config;
+import com.universalbank.trading_system.dto.NotificationEvent;
+import com.universalbank.trading_system.dto.PlaceOrderRequest;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.*;
+import org.springframework.kafka.annotation.EnableKafka;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
 import org.springframework.kafka.support.serializer.JsonSerializer;
-import com.universalbank.trading_system.events.NotificationEvent;
+
 import java.util.HashMap;
 import java.util.Map;
 
 @Configuration
+@EnableKafka
 public class KafkaConfig {
     @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
@@ -26,5 +31,15 @@ public class KafkaConfig {
     @Bean
     public KafkaTemplate<String, NotificationEvent> kafkaTemplate() {
         return new KafkaTemplate<>(producerFactory());
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, NotificationEvent>
+    notificationListenerContainerFactory(
+            ConsumerFactory<String, NotificationEvent> cf
+    ) {
+        var factory = new ConcurrentKafkaListenerContainerFactory<String,NotificationEvent>();
+        factory.setConsumerFactory(cf);
+        return factory;
     }
 }

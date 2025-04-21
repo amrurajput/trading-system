@@ -19,7 +19,7 @@ public class PlaceOrderRequest {
     @NotNull(message = "Client ID is required")
     private Long clientId;
 
-    @NotNull(message = "Sales Person ID is required")
+//    @NotNull(message = "Sales Person ID is required")
     private Long salesPersonId;
 
     private Long traderId;
@@ -46,5 +46,6 @@ public class PlaceOrderRequest {
 
 
     private String createdBy;
+
 
 }

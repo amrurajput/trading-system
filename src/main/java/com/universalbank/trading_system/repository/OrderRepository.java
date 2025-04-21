@@ -14,9 +14,14 @@ public interface OrderRepository extends JpaRepository<Order,Long> {
     Collection<Object> findByAssignedTraderIdAndStatus(Long traderId, Status inProgressStatus);
 
     // un‑assigned new orders
-    List<Order> findBySalesPersonIsNullAndCreatedAtBefore(LocalDateTime cutoff);
+    List<Order> findBySalesPersonIsNullAndStateAndCreatedAtBefore(
+            State state,
+            LocalDateTime cutoff
+    );
 
     // un‑assigned in‑progress orders waiting for a trader
     List<Order> findByAssignedTraderIsNullAndStatusAndStateAndUpdatedAtBefore(
             Status status, State state, LocalDateTime cutoff);
+
+    List<Order> findByStatusAndNotificationSentFalseAndAssignedTraderIsNotNull(Status status);
 }

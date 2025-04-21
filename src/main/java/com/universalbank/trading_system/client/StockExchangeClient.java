@@ -84,13 +84,13 @@ public class StockExchangeClient {
                 }
             }
             JsonNode data = series.path(latestTs);
-            LocalDateTime timestamp = LocalDateTime.parse(latestTs, TS_FORMAT);
+            //LocalDateTime timestamp = LocalDateTime.parse(latestTs, TS_FORMAT);
             double open   = data.path("1. open").asDouble();
             double high   = data.path("2. high").asDouble();
             double low    = data.path("3. low").asDouble();
             double close  = data.path("4. close").asDouble();
             long   volume = data.path("5. volume").asLong();
-            return new PricePoint(timestamp, open, high, low, close, volume);
+            return new PricePoint(LocalDateTime.now(), open, high, low, close, volume);
         } catch (Exception e) {
             log.error("Failed to parse JSON for latest price", e);
             throw new RuntimeException("Invalid price data", e);

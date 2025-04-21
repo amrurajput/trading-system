@@ -1,276 +1,221 @@
 package com.universalbank.trading_system.service;
+
 import com.universalbank.trading_system.constant.TradingAppConstant;
+import com.universalbank.trading_system.dto.*;
 import com.universalbank.trading_system.entity.*;
 import com.universalbank.trading_system.repository.*;
-import com.universalbank.trading_system.dto.*;
 import jakarta.persistence.EntityNotFoundException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderService {
+
     private final OrderRepository orderRepo;
-    private final ClientRepository clientsRepo;
+    private final ClientRepository clients;
     private final SalesPersonRepository salesRepo;
     private final TraderRepository tradersRepo;
-    private final SymbolRepository symbolsRepo;
-    private final StatusRepository statusesRepo;
-    private final StateRepository statesRepo;
+    private final SymbolRepository symbols;
+    private final StatusRepository statuses;
+    private final StateRepository states;
     private final TradeExecutionRepository execRepo;
 
-    public Order placeNewOrder(PlaceOrderRequest dto) {
+
+    @Transactional
+    public OrderSummaryDTO placeNewOrder(PlaceOrderRequest dto) {
+        log.info("placeNewOrder: {}", dto);
+        Order o = new Order();
+        populateLiveOrder(o, dto);
+        orderRepo.saveAndFlush(o);
+        log.info("New live order {} created", o.getId());
+        return toSummary(o);
+    }
 
 
-        List<String> errors = new ArrayList<>();
+    @Transactional
+    public OrderSummaryDTO updateDraftOrder(PlaceOrderRequest dto, Long draftId) {
+        log.info("updateDraftOrder (promote draft={}): {}", draftId, dto);
 
-        Optional<Client> clientOpt = clientsRepo.findById(dto.getClientId());
-        Optional<SalesPerson> spOpt = salesRepo.findByIdAndIsActiveAndIsOccupied(dto.getSalesPersonId(),true, false);
-        Optional<Symbol>  symbolOpt = symbolsRepo.findByCode(dto.getSymbolId());
-        Optional<Status> statusOpt = statusesRepo.findById(dto.getStatusId());
-        Optional<State>  stateOpt  = statesRepo.findById(dto.getStateId());
-
-        if (clientOpt.isEmpty())   errors.add("clientId "   + dto.getClientId() + " not found in system");
-        if (spOpt.isEmpty())       errors.add("salesPersonId " + dto.getSalesPersonId() + " not found in system");
-        if (symbolOpt.isEmpty())   errors.add("symbolId '"  + dto.getSymbolId() + "' not found in system");
-        if (!errors.isEmpty()) {
-            throw new ConstraintViolationException(
-                    "Validation failed: " + String.join("; ", errors), Collections.emptySet()
-            );
+        // 1) Load the draft
+        Order draft = lookup(orderRepo, draftId, "Order");
+        if (!draft.getStatus().getId().equals(TradingAppConstant.draftStatus)) {
+            throw new IllegalStateException("Order " + draftId + " is not a draft");
         }
 
-        Client client        = clientOpt.get();
-        SalesPerson salesP   = spOpt.get();
-        Symbol symbol        = symbolOpt.get();
+        // 2) Populate it as a live order
+        populateLiveOrder(draft, dto);
+
+        // 3) Save & return
+        Order promoted = orderRepo.saveAndFlush(draft);
+        log.info("Draft {} promoted to live order {}", draftId, promoted.getId());
+        return toSummary(promoted);
+    }
+
+
+    private void populateLiveOrder(Order o, PlaceOrderRequest dto) {
+        // lookups
+        Client client = lookup(clients, dto.getClientId(), "Client");
+        Symbol symbol = symbols.findByCode(dto.getSymbolId())
+                .orElseThrow(() -> new EntityNotFoundException("Symbol '" + dto.getSymbolId() + "' not found"));
+
+        // statuses & states
+        Status inProgStatus = lookup(statuses, TradingAppConstant.inProgressStatus, "Status");
+        Status pendStatus = lookup(statuses, TradingAppConstant.pendingAssignmentStatus, "Status");
+        State desiredState = lookup(states, TradingAppConstant.toBeAssignedTOTraderState, "State");
+        State noSpState = lookup(states, TradingAppConstant.SalesPersonNotAvailableState, "State");
+
+        // try SP assignment
+        SalesPerson sp = Optional.ofNullable(dto.getSalesPersonId())
+                .flatMap(id -> salesRepo.findByIdAndIsActiveAndIsOccupied(id, true, false))
+                .orElse(null);
+
+        boolean hasSp = sp != null;
+        Status status = hasSp ? inProgStatus : pendStatus;
+        State state = hasSp ? desiredState : noSpState;
+
+        // now populate
+        o.setClient(client);
+        o.setSymbol(symbol);
+        o.setSalesPerson(sp);
+        o.setQuantity(dto.getQuantity());
+        o.setPriceLimit(dto.getPriceLimit());
+        o.setNotifyThreshold(dto.getPriceLimit());
+        o.setTimeLimit(dto.getTimeLimit());
+        o.setOperationType(dto.getOperationType());
+        o.setStatus(status);
+        o.setState(state);
+
+        // audit
+        LocalDateTime now = LocalDateTime.now();
+        if (o.getId() == null) {
+            o.setCreatedAt(now);
+            o.setCreatedBy(dto.getCreatedBy());
+            o.setNotificationSent(false);
+        } else {
+            o.setUpdatedAt(now);
+            o.setUpdatedBy(dto.getCreatedBy());
+        }
+
+        // post‑assign occupancy if SP was assigned
+        if (hasSp) {
+            updateSalesOccupancy(sp, inProgStatus);
+        }
+    }
+
+
+    @Transactional
+    public OrderSummaryDTO createDraftOrder(PlaceOrderRequest dto) {
+        log.info("createDraftOrder: {}", dto);
+
+        var client = lookup(clients, dto.getClientId(), "Client");
+        var symbol = symbols.findByCode(dto.getSymbolId())
+                .orElseThrow(() -> new EntityNotFoundException("Symbol '" + dto.getSymbolId() + "' not found"));
+        var draftStatus = lookup(statuses, TradingAppConstant.draftStatus, "Status");
+        var draftState = lookup(states, TradingAppConstant.draftState, "State");
 
         Order o = Order.builder()
                 .client(client)
-                .salesPerson(salesP)
                 .symbol(symbol)
+                .salesPerson(null)
                 .quantity(dto.getQuantity())
                 .priceLimit(dto.getPriceLimit())
                 .notifyThreshold(dto.getPriceLimit())
                 .timeLimit(dto.getTimeLimit())
                 .operationType(dto.getOperationType())
-                .status(statusOpt.get())
-                .state(stateOpt.get())
+                .status(draftStatus)
+                .state(draftState)
                 .notificationSent(false)
                 .createdAt(LocalDateTime.now())
                 .createdBy(dto.getCreatedBy())
                 .build();
 
-        var result = orderRepo.saveAndFlush(o);
-
-
-        var  salesPersonNoOfOrders =  orderRepo.findBySalesPersonIdAndStatus(salesP.getId(),statusOpt.get());
-        if(salesPersonNoOfOrders.size() > TradingAppConstant.clientNoOfRequestThreshold) {
-            salesP.setIsOccupied(true);
-            salesRepo.saveAndFlush(salesP);
-        }
-
-        return result;
+        orderRepo.save(o);
+        log.info("Draft order {} created", o.getId());
+        return toSummary(o);
     }
-    public List<Order> list() { return orderRepo.findAll(); }
-    public Order get(Long id) { return orderRepo.findById(id).orElseThrow(); }
-
 
 
     @Transactional
-    public Order updateDraftOrder(PlaceOrderRequest dto, Long orderId) throws Exception {
-        // 1) Fetch and verify draft status
-        Order existing = orderRepo.findById(orderId)
-                .orElseThrow(() -> new EntityNotFoundException("Order " + orderId + " not found"));
-        if (existing.getStatus().getId() != TradingAppConstant.draftStatus) {
-            throw new Exception("Only draft orders (statusId=0) can be updated");
+    public OrderSummaryDTO asignTrader(Long traderId, Long orderId) {
+        log.info("asignTrader: trader={} order={}", traderId, orderId);
+
+        var order = lookup(orderRepo, orderId, "Order");
+        if (!order.getStatus().getId().equals(TradingAppConstant.inProgressStatus) ||
+                !order.getState().getId().equals(TradingAppConstant.toBeAssignedTOTraderState)) {
+            throw new IllegalStateException("Order not in IN_PROGRESS/TRADER_TO_PICK");
         }
 
-        // 2) Gather validation errors
-        List<String> errors = new ArrayList<>();
-        Optional<Client>     clientOpt = clientsRepo.findById(dto.getClientId());
-        Optional<SalesPerson> spOpt     = salesRepo.findByIdAndIsActiveAndIsOccupied(
-                dto.getSalesPersonId(), true, false);
-        Optional<Symbol>     symbolOpt = symbolsRepo.findByCode(dto.getSymbolId());
-        Optional<State>      stateOpt  = statesRepo.findById(TradingAppConstant.inProgressStatus);
-        Optional<Status>     statusOpt = statusesRepo.findById(TradingAppConstant.traderToPickState);
-
-        if (clientOpt.isEmpty())   errors.add("clientId "    + dto.getClientId() + " not found");
-        if (spOpt.isEmpty())       errors.add("salesPersonId " + dto.getSalesPersonId() + " not available");
-        if (symbolOpt.isEmpty())   errors.add("symbolId '"    + dto.getSymbolId() + "' not found");
-        if (stateOpt.isEmpty())    errors.add("stateId "     + dto.getStateId() + " not found");
-        if (statusOpt.isEmpty())   errors.add("statusId "    + dto.getStatusId() + " not found");
-
-        if (!errors.isEmpty()) {
-            throw new ConstraintViolationException(
-                    "Validation failed: " + String.join("; ", errors),
-                    Collections.emptySet()
-            );
+        var trader = lookup(tradersRepo, traderId, "Trader");
+        if (!trader.getIsActive()) {
+            throw new IllegalStateException("Trader " + traderId + " is inactive");
         }
 
-        // 3) Apply updates
-        existing.setClient(clientOpt.get());
-        existing.setSalesPerson(spOpt.get());
-        existing.setSymbol(symbolOpt.get());
-        existing.setQuantity(dto.getQuantity());
-        existing.setPriceLimit(dto.getPriceLimit());
-        existing.setNotifyThreshold(dto.getPriceLimit());
-        existing.setTimeLimit(dto.getTimeLimit());
-        existing.setOperationType(dto.getOperationType());
-        existing.setState(stateOpt.get());
-        existing.setStatus(statusOpt.get());
-        existing.setUpdatedAt(LocalDateTime.now());
-        existing.setUpdatedBy(dto.getCreatedBy());
-
-        // 4) Save & flush
-        Order updated = orderRepo.saveAndFlush(existing);
-
-        // 5) Occupancy logic: count this salesPerson’s orders at the chosen status
-        long count = orderRepo
-                .findBySalesPersonIdAndStatus(spOpt.get().getId(), statusOpt.get())
-                .size();
-        if (count > TradingAppConstant.clientNoOfRequestThreshold) {
-            SalesPerson sp = spOpt.get();
-            sp.setIsOccupied(true);
-            salesRepo.saveAndFlush(sp);
+        // capacity check
+        long cnt = orderRepo.findByAssignedTraderIdAndStatus(
+                traderId,
+                lookup(statuses, TradingAppConstant.inProgressStatus, "Status")
+        ).size();
+        if (trader.getIsOccupied()) {
+            throw new ConstraintViolationException("Trader at capacity " + cnt, null);
         }
 
-        return updated;
-    }
 
-    @Transactional
-    public Order asignTrader(Long traderId, Long orderId) {
-        // 1) Fetch the order and verify it’s awaiting trader assignment
-        Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new EntityNotFoundException("Order " + orderId + " not found"));
-        Long inProgressStatusId   = TradingAppConstant.inProgressStatus;
-        Long traderToPickStateId  = TradingAppConstant.traderToPickState;
-        if (order.getStatus().getId() != inProgressStatusId ||
-                order.getState().getId()  != traderToPickStateId) {
-            throw new IllegalStateException(
-                    "Only orders with status=IN_PROGRESS and state=TRADER_TO_PICK can be assigned");
-        }
-
-        // 2) Fetch the trader
-        Trader trader = tradersRepo.findById(traderId)
-                .orElseThrow(() -> new EntityNotFoundException("Trader " + traderId + " not found"));
-    // check trader is active or not
-
-        if (trader.getIsActive()) {
-            throw new ConstraintViolationException(
-                    "Trader " + traderId +
-                            " is not active ",
-                    Collections.emptySet()
-            );
-        }
-        // 3) Capacity check before assignment
-        Status inProgressStatus = statusesRepo.findById((long)inProgressStatusId)
-                .orElseThrow(() -> new EntityNotFoundException("Status IN_PROGRESS not defined"));
-        long activeCount = orderRepo
-                .findByAssignedTraderIdAndStatus(traderId, inProgressStatus)
-                .size();
-        if (trader.getIsOccupied() ) {
-            throw new ConstraintViolationException(
-                    "Trader " + traderId +
-                            " already has " + activeCount +
-                            " active orders (max = " + TradingAppConstant.clientNoOfRequestThreshold + ")",
-                    Collections.emptySet()
-            );
-        }
-
-        // 4) Assign & audit
+        var pendingStatus = lookup(statuses, TradingAppConstant.inProgressStatus, "Status");
+        var pickedByTrderState = lookup(states, TradingAppConstant.tradePickedByTraderState, "State");
         order.setAssignedTrader(trader);
+        order.setStatus(pendingStatus);
+        order.setState(pickedByTrderState);
         order.setUpdatedAt(LocalDateTime.now());
         order.setUpdatedBy(trader.getName());
-        Order updatedOrder = orderRepo.saveAndFlush(order);
+        orderRepo.saveAndFlush(order);
+        log.info("Trader {} assigned to order {}", traderId, orderId);
 
-        // 5) Post‑assignment: update trader’s occupancy
-        long newCount = orderRepo
-                .findByAssignedTraderIdAndStatus(traderId, inProgressStatus)
-                .size();
-        if (newCount >= TradingAppConstant.clientNoOfRequestThreshold) {
-            trader.setIsOccupied(true);
-        } else {
-            trader.setIsOccupied(false);
-        }
-        tradersRepo.saveAndFlush(trader);
-
-        return updatedOrder;
+        updateTraderOccupancy(trader);
+        return toSummary(order);
     }
 
     @Transactional
-    public void deleteOrder(Long orderId) {
-        // 1) Fetch
-        Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new EntityNotFoundException("Order " + orderId + " not found"));
+    public void deleteOrder(Long id) {
+        log.info("deleteOrder: id={}", id);
 
-        long draftStatusId        = TradingAppConstant.draftStatus;
-        long inProgressStatusId   = TradingAppConstant.inProgressStatus;
-        long traderToPickStateId  = TradingAppConstant.traderToPickState;
-
-        long currentStatusId = order.getStatus().getId();
-        long currentStateId  = order.getState().getId();
-
-        // 2) Check allowed for deletion
-        boolean isDraft        = (currentStatusId == draftStatusId);
-        boolean isPendingPick  = (currentStatusId == inProgressStatusId
-                && currentStateId == traderToPickStateId);
-
-        if (!isDraft && !isPendingPick) {
-            throw new IllegalStateException(
-                    "Cannot delete order in status=" + currentStatusId +
-                            " and state=" + currentStateId);
+        var order = lookup(orderRepo, id, "Order");
+        long st = order.getStatus().getId();
+        long stt = order.getState().getId();
+        boolean can = st == (TradingAppConstant.draftStatus)
+                || (st == (TradingAppConstant.inProgressStatus)
+                && stt == (TradingAppConstant.toBeAssignedTOTraderState));
+        if (!can) {
+            throw new IllegalStateException("Cannot delete order in its current state");
         }
 
-        // Capture references for occupancy update
-        SalesPerson sp = order.getSalesPerson();
-        Trader      tr = order.getAssignedTrader();
-
-        // 3) Delete
+        var sp = order.getSalesPerson();
+        var tr = order.getAssignedTrader();
         orderRepo.delete(order);
         orderRepo.flush();
+        log.info("Order {} deleted", id);
 
-        // 4) Update SalesPerson occupancy
-        long spCount = orderRepo
-                .findBySalesPersonIdAndStatus(sp.getId(),
-                        statusesRepo.findById((long)inProgressStatusId)
-                                .orElseThrow(() -> new EntityNotFoundException("Status IN_PROGRESS not defined")))
-                .size();
-
-        if (spCount < TradingAppConstant.clientNoOfRequestThreshold) {
-            sp.setIsOccupied(false);
-            salesRepo.saveAndFlush(sp);
-        }
-
-        // 5) Update Trader occupancy (if one was assigned)
-        if (tr != null) {
-            long trCount = orderRepo
-                    .findByAssignedTraderIdAndStatus(tr.getId(),
-                            statusesRepo.findById((long)inProgressStatusId)
-                                    .orElseThrow(() -> new EntityNotFoundException("Status IN_PROGRESS not defined")))
-                    .size();
-
-            if (trCount < TradingAppConstant.clientNoOfRequestThreshold) {
-                tr.setIsOccupied(false);
-                tradersRepo.saveAndFlush(tr);
-            }
-        }
+        if (sp != null) updateSalesOccupancy(sp, lookup(statuses, TradingAppConstant.inProgressStatus, "Status"));
+        if (tr != null) updateTraderOccupancy(tr);
     }
 
     @Transactional
-    public TradeExecution execute(ExecuteOrderRequest dto) {
-        // 1) Load order and trader
-        Order order = get(dto.getOrderId());
-        Trader trader = tradersRepo.findById(dto.getTraderId())
-                .orElseThrow(() -> new EntityNotFoundException("Trader " + dto.getTraderId() + " not found"));
+    public TradeExecutionResponse execute(ExecuteOrderRequest dto) {
+        log.info("execute: {}", dto);
 
-        // 2) Persist this execution
-        TradeExecution te = TradeExecution.builder()
+        var order = lookup(orderRepo, dto.getOrderId(), "Order");
+        var trader = lookup(tradersRepo, dto.getTraderId(), "Trader");
+
+        var te = TradeExecution.builder()
                 .order(order)
                 .executedBy(trader)
                 .executedQty(dto.getQty())
@@ -279,41 +224,113 @@ public class OrderService {
                 .build();
         te = execRepo.save(te);
 
-        // 3) Recompute cumulative executed quantity
-        List<TradeExecution> allExecs = execRepo.findByOrder(order);
-        double totalExecuted = allExecs.stream()
+        // recalc total
+        double total = execRepo.findByOrder(order).stream()
                 .mapToDouble(TradeExecution::getExecutedQty)
                 .sum();
+        var newState = total >= order.getQuantity()
+                ? states.findById(TradingAppConstant.fullyExcecutedState)
+                : states.findById(TradingAppConstant.partialExcecutedState);
 
-        // 4) Decide new state
-        State newState;
-        if (totalExecuted >= order.getQuantity()) {
-            newState = statesRepo.findByName("COMPLETED");
-        } else {
-            newState = statesRepo.findByName("PARTIALLY_COMPLETED");
-        }
-        order.setState(newState);
+        var newStatus = total >= order.getQuantity()
+                ? statuses.findById(TradingAppConstant.completedStatus)
+                : statuses.findById(TradingAppConstant.inProgressStatus);
+        order.setState(newState.get());
+        order.setStatus(newStatus.get());
         order.setUpdatedAt(LocalDateTime.now());
         order.setUpdatedBy(trader.getName());
-
-        // 5) Persist order update
         orderRepo.save(order);
 
-        // 6) Update trader occupancy: count remaining in-progress orders
-        Status inProgressStatus = statusesRepo.findById(
-                (long) TradingAppConstant.inProgressStatus
-        ).orElseThrow(() -> new EntityNotFoundException("Status IN_PROGRESS not defined"));
+        updateTraderOccupancy(trader);
+        log.info("Execution {} saved; order {} state={}", te.getId(), order.getId(), newState.get().getName());
 
-        long activeCount = orderRepo
-                .findByAssignedTraderIdAndStatus(trader.getId(), inProgressStatus)
-                .size();
+        return new TradeExecutionResponse(
+                order.getId(),
+                order.getClient().getId(),
+                order.getSalesPerson() != null
+                        ? order.getSalesPerson().getId()
+                        : null,
+                te.getExecutedBy().getId(),
+                order.getQuantity(),
+                te.getExecutedQty(),
+                te.getExecutedPrice(),
+                te.getExecutedAt(),
+                order.getNotifyThreshold(),
+                order.getOperationType(),
+                order.getStatus().getName(),
+                order.getState().getName()
+        );
+    }
 
-        // If they've dropped below the threshold, clear their occupied flag
-        if (activeCount < TradingAppConstant.clientNoOfRequestThreshold && trader.getIsOccupied()) {
-            trader.setIsOccupied(false);
-            tradersRepo.saveAndFlush(trader);
+    private <T, ID> T lookup(JpaRepository<T, ID> repo, ID id, String name) {
+        return repo.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException(name + " " + id + " not found"));
+    }
+
+    private void updateSalesOccupancy(SalesPerson sp, Status status) {
+        long cnt = orderRepo.findBySalesPersonIdAndStatus(sp.getId(), status).size();
+        boolean occ = cnt >= TradingAppConstant.NofOrderRequestThreshold;
+        if (sp.getIsOccupied() != occ) {
+            sp.setIsOccupied(occ);
+            salesRepo.saveAndFlush(sp);
         }
+    }
 
-        return te;
+    private void updateTraderOccupancy(Trader tr) {
+        long cnt = orderRepo.findByAssignedTraderIdAndStatus(
+                tr.getId(),
+                lookup(statuses, TradingAppConstant.inProgressStatus, "Status")
+        ).size();
+        boolean occ = cnt >= TradingAppConstant.NofOrderRequestThreshold;
+        if (tr.getIsOccupied() != occ) {
+            tr.setIsOccupied(occ);
+            tradersRepo.saveAndFlush(tr);
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public List<Order> list() {
+        log.debug("list()");
+        return orderRepo.findAll();
+    }
+
+
+    @Transactional(readOnly = true)
+    public Order get(Long id) {
+        log.debug("get(id={})", id);
+        return lookup(orderRepo, id, "Order");
+    }
+
+    public List<SalesPerson> activeSalesPeople() {
+        var result = salesRepo.findByIsActiveAndIsOccupied(true, false);
+        if (result.size() < 1) {
+            log.error("No active Sales Person Available in System to Handle Trade");
+        }
+        return result;
+    }
+
+    public List<Trader> activeTraders() {
+        var result = tradersRepo.findByIsActiveTrueAndIsOccupiedFalse();
+        if (result.size() < 1) {
+            log.error("No active Sales Person Available in System to Handle Trade");
+        }
+        return result;
+    }
+
+
+    private OrderSummaryDTO toSummary(Order o) {
+        return new OrderSummaryDTO(
+                o.getId(),
+                o.getClient().getId(),
+                o.getSalesPerson() != null ? o.getSalesPerson().getId() : null,
+                o.getAssignedTrader() != null ? o.getAssignedTrader().getId() : null,
+                o.getSymbol().getCode(),
+                o.getPriceLimit(),
+                o.getQuantity(),
+                o.getState().getName(),
+                o.getStatus().getName(),
+                o.getOperationType()
+        );
     }
 }
+

@@ -27,20 +27,28 @@ public class AutoAssignmentScheduler {
     /**
      * Runs every minute.  If the feature flag is off, does nothing.
      */
-    @Scheduled(fixedRate = 60_000)
+    @Scheduled(
+            fixedRateString = "#{T(com.universalbank.trading_system.constant.TradingAppConstant).autoAssignDelayMinutes * 60000}",
+            initialDelayString = "#{T(com.universalbank.trading_system.constant.TradingAppConstant).autoAssignDelayMinutes * 60000}"
+    )
     @Transactional
     public void autoAssign() {
         if (!TradingAppConstant.autoAssignEnabled) {
             log.debug("Auto‑assign is disabled");
             return;
         }
+        Status  inProgStatus   = statusesRepo.findById(TradingAppConstant.inProgressStatus)
+                .orElseThrow();
+        State   pickState      = statesRepo.findById(TradingAppConstant.toBeAssignedTOTraderState)
+                .orElseThrow();
 
         LocalDateTime cutoff = LocalDateTime.now()
                 .minusMinutes(TradingAppConstant.autoAssignDelayMinutes);
 
         // 1) New orders with no salesPerson
+        var stateWithNoClient = statesRepo.findById(TradingAppConstant.SalesPersonNotAvailableState);
         List<Order> unclaimedSales = orderRepo
-                .findBySalesPersonIsNullAndCreatedAtBefore(cutoff);
+                .findBySalesPersonIsNullAndStateAndCreatedAtBefore(stateWithNoClient.get(), cutoff);
 
         for (Order o : unclaimedSales) {
             Optional<SalesPerson> optSp = salesRepo
@@ -48,6 +56,8 @@ public class AutoAssignmentScheduler {
             if (optSp.isPresent()) {
                 SalesPerson sp = optSp.get();
                 o.setSalesPerson(sp);
+                o.setStatus(inProgStatus);
+                o.setState(pickState);
                 o.setUpdatedAt(LocalDateTime.now());
                 o.setUpdatedBy("SYSTEM‑AUTO");
                 orderRepo.saveAndFlush(o);
@@ -59,7 +69,7 @@ public class AutoAssignmentScheduler {
                                 statusesRepo.findById(TradingAppConstant.inProgressStatus)
                                         .orElseThrow()
                         ).size();
-                if (cnt > TradingAppConstant.clientNoOfRequestThreshold) {
+                if (cnt > TradingAppConstant.NofOrderRequestThreshold) {
                     sp.setIsOccupied(true);
                     salesRepo.saveAndFlush(sp);
                 }
@@ -68,10 +78,7 @@ public class AutoAssignmentScheduler {
         }
 
         // 2) In‑progress orders waiting for trader
-        Status  inProgStatus   = statusesRepo.findById(TradingAppConstant.inProgressStatus)
-                .orElseThrow();
-        State   pickState      = statesRepo.findById(TradingAppConstant.traderToPickState)
-                .orElseThrow();
+
         List<Order> unclaimedTraders = orderRepo
                 .findByAssignedTraderIsNullAndStatusAndStateAndUpdatedAtBefore(
                         inProgStatus, pickState, cutoff);
@@ -92,7 +99,7 @@ public class AutoAssignmentScheduler {
                                 tr.getId(),
                                 inProgStatus
                         ).size();
-                tr.setIsOccupied(cnt >= TradingAppConstant.clientNoOfRequestThreshold);
+                tr.setIsOccupied(cnt >= TradingAppConstant.NofOrderRequestThreshold);
                 tradersRepo.saveAndFlush(tr);
 
                 log.info("Auto‑assigned Trader {} to Order {}", tr.getId(), o.getId());

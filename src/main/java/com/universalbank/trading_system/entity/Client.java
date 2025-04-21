@@ -8,7 +8,8 @@ import java.time.LocalDateTime;
 @Entity
 @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class Client {
-    @Id @GeneratedValue private Long id;
+    @Id
+    private Long id;
     @NotBlank private String name;
     @Email private String email;
     private String phone;

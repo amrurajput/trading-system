@@ -8,7 +8,7 @@ import java.time.LocalDateTime;
 @Entity
 @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class State {
-    @Id @GeneratedValue private Long id;
+    @Id  private Long id;
     @NotBlank
     private String name;
     private String description;

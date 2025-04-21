@@ -1,10 +1,10 @@
 package com.universalbank.trading_system.scheduler;
 
-import com.universalbank.trading_system.events.NotificationEvent;
+import com.universalbank.trading_system.dto.NotificationEvent;
 import com.universalbank.trading_system.entity.Order;
-import com.universalbank.trading_system.entity.Status;
 import com.universalbank.trading_system.repository.OrderRepository;
 import com.universalbank.trading_system.client.StockExchangeClient;
+import com.universalbank.trading_system.repository.StatusRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -19,16 +19,18 @@ import java.util.List;
 @Slf4j
 public class NotificationScheduler {
     private final OrderRepository orderRepo;
+    private final StatusRepository statusRepo;
     private final StockExchangeClient client;
     private final KafkaTemplate<String, NotificationEvent> kafka;
 
     private static final String TOPIC = "order-thresholds";
-    private static final Status PENDING = new Status(1L, "PENDING", null, null, null, null, null);
+
 
     @Scheduled(fixedRate = 60_000)
     public void checkThresholds() {
         log.info("Threshold scheduler started");
-        List<Order> orders = orderRepo.findByStatusAndNotificationSentFalse(PENDING);
+       var inProgress = statusRepo.findById(1l).get();
+        List<Order> orders = orderRepo.findByStatusAndNotificationSentFalseAndAssignedTraderIsNotNull(inProgress);
         for (Order o : orders) {
             // fetch latest close price (blocking)
             double price = client.fetchLatestClose(o.getSymbol().getCode());

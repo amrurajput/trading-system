@@ -1,4 +1,4 @@
-package com.universalbank.trading_system.Exception;
+package com.universalbank.trading_system.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -23,6 +23,6 @@ public class GlobalExceptionHandler {
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public Map<String,String> handleAll(Exception ex) {
         log.error("Unexpected error", ex);
-        return Map.of("error", "Internal server error");
+        return Map.of("error", "Error Handling Request :: "+ex.getMessage());
     }
 }

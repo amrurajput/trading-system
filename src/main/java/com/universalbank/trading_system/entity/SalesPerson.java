@@ -8,7 +8,7 @@ import java.util.Set;
 @Entity
 @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class SalesPerson {
-    @Id @GeneratedValue private Long id;
+    @Id  private Long id;
     private String name;
     private String desk;
     @ManyToMany

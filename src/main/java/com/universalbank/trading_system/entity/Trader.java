@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 @Entity
 @Data @NoArgsConstructor @AllArgsConstructor @Builder
 public class Trader {
-    @Id @GeneratedValue private Long id;
+    @Id  private Long id;
     private String name;
     private String specialty;
     private Boolean isActive;
